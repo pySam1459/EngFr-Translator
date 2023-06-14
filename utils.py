@@ -4,13 +4,12 @@ import h5py
 import pickle
 from tiktoken import get_encoding, Encoding
 from threading import Event as Event_t
-from multiprocessing import Event, Queue, Process
+from torch.multiprocessing import Event, Queue, Process
 from random import shuffle, seed as r_seed
 from dotenv import dotenv_values
 from dataclasses import dataclass
 from os import listdir
 from os.path import join
-from tqdm import tqdm
 from typing import Iterator
 
 
@@ -18,7 +17,8 @@ __all__ = [
     "load_encoding",
     "LRScheduler",
     "DataLoader",
-    "CKPTMetaData"]
+    "CKPTMetaData"
+    ]
 
 
 def load_encoding() -> Encoding:
@@ -84,8 +84,6 @@ class DataLoader:
         self.partitions = listdir(self.partition_path)
 
         self.total = self.get_total()
-        self.prog_bar = tqdm(total=self.total)
-        self.encoding = load_encoding()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.c_epoch = -1
@@ -108,22 +106,24 @@ class DataLoader:
         return a * torch.exp(-b  * torch.pow(x / x[:, -2:-1], 2))
 
     def load_worker(self, out: Queue, next_batch: Event_t) -> None:
-        print("Loading worker started")
-        vec_len = np.vectorize(len)
+        encoding = load_encoding()
         special_tokens = torch.tensor(
-            self.encoding.encode("<|start|><|pad|><|endoftext|>", allowed_special="all"), 
+            encoding.encode("<|start|><|pad|><|endoftext|>", allowed_special="all"), 
             dtype=torch.long)
         start_token, pad_token, end_token = special_tokens.split(1)
-
+        
+        vec_len = np.vectorize(len)
         r_seed(1459) ## set seed for partition shuffling
         for epoch in range(self.epochs):
             self.c_epoch = epoch
             shuffle(self.partitions) ## shuffle order of files
             
-            for file in self.partitions:
+            for file in self.partitions: ## iterates over pre-processed dataset
                 self.c_partition = file
 
                 en_data, fr_data = self.load_partition(join(self.partition_path, file))
+                ## data below used to compute random-ish batches 
+                ##   with sentences of approximately the same length
                 fr_lens = vec_len(fr_data)
                 unique = np.unique(fr_lens)
                 indices = torch.from_numpy(np.searchsorted(fr_lens, unique))
@@ -143,18 +143,26 @@ class DataLoader:
 
                     ## ix contains the indicies of the sentence pairs to use in the batch
                     ix = torch.multinomial(probs, self.batch_size, replacement=True).squeeze()
-                    en = torch.stack([torch.from_numpy(en_data[i]) for i in ix])
+                    en = torch.stack([torch.from_numpy(en_data[i]) for i in ix]) ## get english sentences
                     
+                    ## two tensors of french sentences are created
+                    ##  1. fr_0: goes into the network, used to predict the next token
+                    ##  2. fr_1: contains the correct token, used to calculate loss
+                    ## special tokens are added at this stage
                     frs = [torch.from_numpy(fr_data[i]) for i in ix]
                     max_len = max(frs, key=lambda x: x.shape[0])
                     fr_0 = torch.stack([torch.cat([fr_d, end_token] + [pad_token] * (max_len-fr_d.shape[0])) for fr_d in frs])
                     fr_1 = torch.stack([torch.cat([start_token, fr_d] + [pad_token] * (max_len-fr_d.shape[0])) for fr_d in frs])
-    
+
+                    ## batch is sent to device and put into out queue
+                    en = en.to(self.device)
+                    fr_0 = fr_0.to(self.device)
+                    fr_1 = fr_1.to(self.device)
+
                     out.put((en, fr_0, fr_1))
                     next_batch.wait() ## wait for iterator to request next batch
 
         out.put(None) ## notify iterator that we're done
-
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Creates a deamon process to load batches in the background."""
@@ -166,14 +174,9 @@ class DataLoader:
                                daemon=True)
         load_process.start()
         
-        self.prog_bar.reset()
         next_batch.set() ## prepare first batch
         while (result := out_queue.get()) is not None:
             next_batch.set() ## notify load_worker to load next batch
             yield result     ## batch to be used for training
-            self.prog_bar.update(1)
 
         load_process.join()
-
-    def set_desc(self, desc: str) -> None:
-        self.prog_bar.set_description(desc)

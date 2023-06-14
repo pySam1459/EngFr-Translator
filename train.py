@@ -6,6 +6,7 @@ from datetime import datetime
 from os import mkdir
 from os.path import exists, join
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,7 +43,8 @@ def main():
     lr_scheduler = LRScheduler(optimizer, warmup_steps=1000, peak_lr=1e-4)
     
     loader = DataLoader(batch_size=64, epochs=1)
-    for i, (en, fr_0, fr_1) in enumerate(loader, start=1):
+    prog_bar = tqdm(enumerate(loader, start=1), total=loader.total)
+    for i, (en, fr_0, fr_1) in prog_bar:
         optimizer.zero_grad(set_to_none=True)
         
         logits = model(en, fr_0)
@@ -52,7 +54,7 @@ def main():
         optimizer.step()
         lr_scheduler.step()
 
-        loader.set_desc(f"{loss.item():.4f}")
+        prog_bar.set_description(f"{loss.item():.4f}")
         
         if i % ckpt_period == 0: ## save checkpoint
             ckpt_metadata = CKPTMetaData(loader.c_epoch, loader.c_partition, optimizer.param_groups[0]["lr"])
