@@ -1,0 +1,7 @@
+__pycache__/
+
+.env
+
+test.py
+test.ipynb
+dataset_info.ipynb
