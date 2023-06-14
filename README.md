@@ -1,6 +1,6 @@
 # Translator
 
-A Pytorch implementation of an English to French translator by Samuel Barnett.</br>
+A PyTorch implementation of an English to French translator by Samuel Barnett.</br>
 The implementation loosely follows from the 'Attention Is All You Need' paper, which initially introducing the transformer architecture [Link](https://arxiv.org/pdf/1706.03762.pdf).
 
 ## Dataset
@@ -38,6 +38,7 @@ The translator model follows a similar architecture to the transformer outlined 
 With the hyperparameters outlined below, the total parameter count is approximately = 84.4M</br>
 </br>
 | Hyperparameter |  |
+| --- | --- |
 | d_model | 384 |
 | n_layers | 6 |
 | n_head | 6 |
