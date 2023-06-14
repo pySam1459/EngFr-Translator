@@ -14,7 +14,11 @@ from tqdm import tqdm
 from typing import Iterator
 
 
-__all__ = ["load_encoding", "DataLoader", "CKPTMetaData"]
+__all__ = [
+    "load_encoding",
+    "LRScheduler",
+    "DataLoader",
+    "CKPTMetaData"]
 
 
 def load_encoding() -> Encoding:
@@ -47,6 +51,27 @@ class CKPTMetaData:
     def load(file_path: str) -> "CKPTMetaData":
         with open(file_path, "rb") as f_in:
             return pickle.load(f_in)
+
+
+class LRScheduler:
+    """Linear warmup and inverse square root decay."""
+    def __init__(self, optimizer: torch.optim.Optimizer, warmup_steps: int, peak_lr: float):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.peak_lr = peak_lr
+        self.current_step = 0
+
+    def step(self):
+        self.current_step += 1
+        lr = self.calculate_learning_rate()
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
+    def calculate_learning_rate(self):
+        if self.current_step < self.warmup_steps:
+            return self.peak_lr * self.current_step / self.warmup_steps
+        else:
+            return self.peak_lr / (self.current_step ** 0.5)
 
 
 class DataLoader:
