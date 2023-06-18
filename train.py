@@ -1,24 +1,28 @@
 import torch
 from torch.nn import functional as F
+from torch.amp import autocast
 from model import Translator, Config
 from utils import *
 from datetime import datetime
 from os import mkdir
 from os.path import exists, join
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from tqdm import tqdm
+from time import perf_counter
 
 
+# torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+# torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-config = load_dotenv()
+env_config = dotenv_values(".env")
 
 
 def save_ckpt(model: Translator, metadata: CKPTMetaData) -> None:
-    ckpt_path = config["CKPT_PATH"]
+    ckpt_path = env_config["CKPT_PATH"]
     if not exists(ckpt_path):
         mkdir(ckpt_path)
 
-    tid = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tid = datetime.now().strftime("%Y-%m-%d_%H,%M,%S")
     model.save_ckpt(join(ckpt_path, f"ckpt_{tid}.pt"))
     metadata.save(join(ckpt_path, "ckpt_{tid}.pkl"))
 
@@ -33,7 +37,11 @@ def main():
         n_layer = 6,
         dropout = 0.1
     )
-    ckpt_period = 1000
+    batch_size = 64
+    chunksize = 4
+    ckpt_period = 512
+    grad_clip = 1.0
+    assert batch_size % chunksize == 0
     
     model = Translator(config, encoding)
     model = model.to(device)
@@ -42,24 +50,35 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     lr_scheduler = LRScheduler(optimizer, warmup_steps=1000, peak_lr=1e-4)
     
-    loader = DataLoader(batch_size=64, epochs=1)
+    ctx = autocast(device_type="cuda", dtype=torch.float16)
+    scaler = torch.cuda.amp.GradScaler()
+    
+    loader = DataLoader(batch_size=batch_size, epochs=1)
     prog_bar = tqdm(enumerate(loader, start=1), total=loader.total)
+    s1 = perf_counter()
     for i, (en, fr_0, fr_1) in prog_bar:
+        s2 = perf_counter()
         optimizer.zero_grad(set_to_none=True)
         
-        logits = model(en, fr_0)
-        loss = F.cross_entropy(logits, fr_1)
-        
-        loss.backward()
-        optimizer.step()
-        lr_scheduler.step()
+        for k in range(0, batch_size, chunksize):
+            with ctx:
+                _, loss = model(en[k:k+chunksize], fr_0[k:k+chunksize], fr_1[k:k+chunksize])
+                loss /= batch_size/chunksize
+            scaler.scale(loss).backward()
 
-        prog_bar.set_description(f"{loss.item():.4f}")
+        scaler.unscale_(optimizer)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+        lr_scheduler.step()
         
+        e1 = perf_counter()
+        prog_bar.set_description(f"{loss.item():.7f} {s2-s1:.3f} {e1-s2:.3f}")
+        s1 = e1
         if i % ckpt_period == 0: ## save checkpoint
             ckpt_metadata = CKPTMetaData(loader.c_epoch, loader.c_partition, optimizer.param_groups[0]["lr"])
             save_ckpt(model, ckpt_metadata)
-
+        
 
 if __name__ == "__main__":
     main()

@@ -188,22 +188,27 @@ class Translator(nn.Module):
         self.n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.encoding = encoding
     
-    def forward(self, x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, idx: torch.Tensor, targets: torch.Tensor | None = None) -> torch.Tensor:
         q, k = self.encoder(x)
         logits = self.decoder(idx, q, k)
-        return logits
+        
+        if targets is None:
+            return logits, None
+        else:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            return logits, loss
 
-    def translate(self, x: torch.Tensor, max_len: int = 100, temperature: float = 1.0) -> torch.Tensor:
+    def translate(self, x: torch.Tensor, max_len: int = 512, temperature: float = 1.0) -> torch.Tensor:
         ## x text to be translated
         ## batch dim = 1
         start_tok, end_tok = self.encoding.encode("<|start|><|endoftext|>", 
             allowed_special="all")
         idx = torch.tensor([start_tok], dtype=torch.long, device=device)
         for _ in range(max_len):
-            logits = self.forward(x)
+            logits, _ = self.forward(x, idx.view(1, -1))
             logits = logits[:, -1, :] / temperature
             probs = F.softmax(logits, dim=-1)
-            next_idx = torch.multinomial(probs, num_samples=1)
+            next_idx = torch.multinomial(probs, num_samples=1).view(1)
             
             if next_idx.item() == end_tok: break
             idx = torch.cat((idx, next_idx), dim=-1)
@@ -211,4 +216,4 @@ class Translator(nn.Module):
         return self.encoding.decode(idx[0].tolist())
 
     def save_ckpt(self, path: str) -> None:
-        torch.save(self, path)
+        torch.save(self.state_dict(), path)
